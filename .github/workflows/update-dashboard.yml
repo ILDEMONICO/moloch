@@ -1,0 +1,36 @@
+name: Aggiorna dashboard MOLOCH
+
+on:
+  schedule:
+    - cron: '30 */6 * * *'   # ogni 6 ore (i run MOLOCH escono ~3-4h dopo il reftime)
+  workflow_dispatch: {}       # bottone "Run workflow" per test manuali
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa ecCodes (necessario a cfgrib)
+        run: sudo apt-get update && sudo apt-get install -y libeccodes-dev libeccodes0
+
+      - name: Installa dipendenze Python
+        run: pip install -r scripts/requirements.txt
+
+      - name: Genera data/dashboard.json
+        run: python scripts/fetch_moloch.py --out data/dashboard.json
+
+      - name: Commit e push se ci sono cambiamenti
+        run: |
+          git config user.name "moloch-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add data/dashboard.json
+          git diff --staged --quiet || git commit -m "Aggiorna previsioni MOLOCH $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push
