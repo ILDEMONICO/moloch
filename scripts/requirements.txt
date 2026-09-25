@@ -1,0 +1,4 @@
+requests
+xarray
+cfgrib
+pandas
