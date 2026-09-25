@@ -2,152 +2,191 @@
 """
 fetch_moloch.py
 
-Pensato per girare dentro GitHub Actions (non sul tuo hosting).
-Scarica l'ultimo run disponibile di MOLOCH-AIM da MeteoHub, estrae la
-serie temporale nel punto piu' vicino a Catania e salva un JSON compatto
-che la pagina HTML su Altervista andra' a leggere via jsDelivr.
+Gira dentro GitHub Actions. Scarica i file GRIB2 di MOLOCH-AIM direttamente
+da /nwp/MOLOCH_AIM/ su MeteoHub (niente bundle API, che non risulta
+funzionante per questo dataset), scopre da solo i nomi file scorrendo
+l'index Apache delle cartelle, ed estrae con ecCodes il valore piu' vicino
+a Catania per ogni messaggio (= ogni scadenza temporale) nel file.
 
-Uso (dentro il workflow):
+Uso:
     python scripts/fetch_moloch.py --out data/dashboard.json
 """
 
 import argparse
 import json
+import re
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
-import xarray as xr
-import pandas as pd
+import eccodes as ec
 
-BASE_URL = "https://meteohub.agenziaitaliameteo.it"
-DATASET_ID = "MOLOCH-AIM"  # verifica il valore esatto su /app/datasets se questo non funziona
+BASE = "https://meteohub.agenziaitaliameteo.it/nwp/MOLOCH_AIM"
 
 DEFAULT_LAT = 37.5079
 DEFAULT_LON = 15.0830
 PLACE_NAME = "Catania"
 
-VARIABLES = {
-    "temperatura": ["t2m", "2t", "temperature_2m"],
-    "precipitazione": ["tp", "precipitation", "total_precipitation"],
-    "vento_u": ["u10", "10u"],
-    "vento_v": ["v10", "10v"],
-    "umidita": ["r2", "rh2m", "relative_humidity_2m", "2r"],
+# variabile amichevole -> nome cartella su /nwp/MOLOCH_AIM/{run}/
+VAR_FOLDERS = {
+    "temperatura": "2t",
+    "vento_u": "10u",
+    "vento_v": "10v",
+    "umidita": "2r",
 }
-
-# I run MOLOCH tipicamente disponibili: 00 e 12 UTC. Proviamo le combinazioni
-# piu' recenti a scalare finche' una scarica con successo.
-def candidate_reftimes(n=6):
-    now = datetime.now(timezone.utc)
-    candidates = []
-    day = now
-    runs = ["12", "00"]
-    # partiamo dall'ultimo run gia' passato
-    for i in range(n):
-        for run in runs:
-            reftime = day.strftime("%Y%m%d")
-            run_dt = day.replace(hour=int(run), minute=0, second=0, microsecond=0)
-            if run_dt <= now:
-                candidates.append((reftime, f"{run}:00"))
-        day -= timedelta(days=1)
-    return candidates
+PRECIP_FOLDER = "unknown"  # da verificare via log — vedi discovered_shortnames
 
 
-def try_download(dataset_id: str, reftime: str, run: str, out_path: Path) -> bool:
-    url = f"{BASE_URL}/api/opendata/{dataset_id}/download"
-    params = {"reftime": reftime, "run": run}
-    try:
-        with requests.get(url, params=params, stream=True, timeout=120) as r:
-            if r.status_code != 200:
-                return False
-            with open(out_path, "wb") as f:
-                for chunk in r.iter_content(chunk_size=1 << 20):
-                    f.write(chunk)
-        return out_path.stat().st_size > 1000  # scarta risposte vuote/errore mascherate da 200
-    except requests.RequestException:
-        return False
+def list_index(url: str):
+    """Ritorna gli href elencati in una pagina Apache 'Index of'."""
+    r = requests.get(url, timeout=60)
+    r.raise_for_status()
+    hrefs = re.findall(r'href="([^"]+)"', r.text)
+    return [h for h in hrefs if h not in ("../",)]
 
 
-def find_var(ds, aliases):
-    for name in aliases:
-        if name in ds.data_vars:
-            return ds[name]
-    return None
+def find_latest_run() -> str:
+    """Trova la cartella run piu' recente sotto MOLOCH_AIM/ (formato YYYYMMDDHH)."""
+    entries = list_index(BASE + "/")
+    runs = sorted(e.strip("/") for e in entries if re.match(r"^\d{10}/$", e))
+    if not runs:
+        raise RuntimeError(f"Nessuna cartella run trovata sotto {BASE}/")
+    return runs[-1]
 
 
-def extract_series(grib_path: Path, lat: float, lon: float) -> pd.DataFrame:
-    ds = xr.open_dataset(grib_path, engine="cfgrib")
-    print("Variabili nel file:", list(ds.data_vars), file=sys.stderr)
+def find_grib_file(run: str, folder: str) -> str:
+    """Trova il (primo/unico) file .grib in una cartella variabile."""
+    url = f"{BASE}/{run}/{folder}/"
+    entries = list_index(url)
+    gribs = [e for e in entries if e.endswith(".grib")]
+    if not gribs:
+        raise RuntimeError(f"Nessun file .grib trovato in {url}")
+    return url + gribs[0]
 
-    records = {}
-    for friendly_name, aliases in VARIABLES.items():
-        var = find_var(ds, aliases)
-        if var is None:
-            continue
-        series = var.sel(latitude=lat, longitude=lon, method="nearest")
-        records[friendly_name] = series.values.tolist()
 
-    point = ds.sel(latitude=lat, longitude=lon, method="nearest")
-    if "valid_time" in point.coords:
-        times = pd.to_datetime(point["valid_time"].values)
-    elif "step" in point.coords:
-        times = pd.to_datetime(point["step"].values)
-    else:
-        times = pd.to_datetime(point["time"].values)
+def download(url: str, out_path: Path):
+    print(f"Scarico {url} ...", file=sys.stderr)
+    with requests.get(url, stream=True, timeout=600) as r:
+        r.raise_for_status()
+        with open(out_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=1 << 20):
+                f.write(chunk)
+    print(f"  -> {out_path} ({out_path.stat().st_size / 1e6:.1f} MB)", file=sys.stderr)
 
-    df = pd.DataFrame(records)
-    df.insert(0, "datetime", times)
 
-    if "vento_u" in df.columns and "vento_v" in df.columns:
-        df["vento"] = (df["vento_u"] ** 2 + df["vento_v"] ** 2) ** 0.5
-        df.drop(columns=["vento_u", "vento_v"], inplace=True)
+def extract_nearest_series(grib_path: Path, lat: float, lon: float, shortname_filter=None):
+    """
+    Scorre tutti i messaggi GRIB nel file, estrae il valore piu' vicino a
+    (lat, lon) per ognuno. Ritorna lista di dict {valid_time, shortname, value}
+    e l'insieme di tutti gli shortName incontrati (utile per debug).
+    """
+    out = []
+    seen_shortnames = set()
+    with open(grib_path, "rb") as f:
+        while True:
+            gid = ec.codes_grib_new_from_file(f)
+            if gid is None:
+                break
+            try:
+                short_name = ec.codes_get(gid, "shortName")
+                seen_shortnames.add(short_name)
+                if shortname_filter and short_name not in shortname_filter:
+                    continue
 
-    return df
+                valid_date = ec.codes_get(gid, "validityDate")  # YYYYMMDD
+                valid_time = ec.codes_get(gid, "validityTime")  # HMM or HHMM
+                dt = datetime.strptime(f"{valid_date}{valid_time:04d}", "%Y%m%d%H%M")
+
+                nearest = ec.codes_grib_find_nearest(gid, lat, lon)
+                best = min(nearest, key=lambda p: p.distance)
+
+                out.append({"valid_time": dt, "shortname": short_name, "value": best.value})
+            finally:
+                ec.codes_release(gid)
+    return out, seen_shortnames
+
+
+def to_series_dict(entries):
+    """Converte lista di {valid_time, value} (gia' filtrata per 1 variabile) in due liste allineate."""
+    entries = sorted(entries, key=lambda e: e["valid_time"])
+    times = [e["valid_time"] for e in entries]
+    values = [e["value"] for e in entries]
+    return times, values
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", required=True, help="Path del file JSON di output")
-    ap.add_argument("--dataset-id", default=DATASET_ID)
+    ap.add_argument("--out", required=True)
     ap.add_argument("--lat", type=float, default=DEFAULT_LAT)
     ap.add_argument("--lon", type=float, default=DEFAULT_LON)
     ap.add_argument("--place-name", default=PLACE_NAME)
+    ap.add_argument("--workdir", default="./moloch_tmp")
     args = ap.parse_args()
 
-    tmp_grib = Path("bundle.grib2")
-    used_reftime, used_run = None, None
+    workdir = Path(args.workdir)
+    workdir.mkdir(parents=True, exist_ok=True)
 
-    for reftime, run in candidate_reftimes():
-        print(f"Provo reftime={reftime} run={run}...", file=sys.stderr)
-        if try_download(args.dataset_id, reftime, run, tmp_grib):
-            used_reftime, used_run = reftime, run
-            print(f"OK: run {reftime} {run} disponibile.", file=sys.stderr)
-            break
+    run = find_latest_run()
+    print(f"Run piu' recente trovato: {run}", file=sys.stderr)
+
+    series = {}
+    master_times = None
+
+    for friendly, folder in VAR_FOLDERS.items():
+        file_url = find_grib_file(run, folder)
+        local = workdir / f"{folder}.grib"
+        download(file_url, local)
+        entries, shortnames = extract_nearest_series(local, args.lat, args.lon)
+        print(f"  shortName trovati in {folder}: {shortnames}", file=sys.stderr)
+        times, values = to_series_dict(entries)
+        series[friendly] = values
+        if master_times is None:
+            master_times = times
+        local.unlink(missing_ok=True)
+
+    # Precipitazione: cartella "unknown", shortName da scoprire dal log.
+    precip_url = find_grib_file(run, PRECIP_FOLDER)
+    local = workdir / "precip.grib"
+    download(precip_url, local)
+    entries, shortnames = extract_nearest_series(local, args.lat, args.lon)
+    print(f"  shortName trovati in {PRECIP_FOLDER}: {shortnames}", file=sys.stderr)
+    # Proviamo gli shortName piu' comuni per la precipitazione totale.
+    precip_candidates = ["tp", "prate", "tirf", "rain", "acraint"]
+    chosen = next((s for s in precip_candidates if s in shortnames), None)
+    if chosen:
+        print(f"  Uso '{chosen}' come precipitazione.", file=sys.stderr)
+        filtered = [e for e in entries if e["shortname"] == chosen]
+        _, precip_values = to_series_dict(filtered)
     else:
-        print("Nessun run disponibile trovato tra i candidati.", file=sys.stderr)
-        sys.exit(1)
+        print(f"  ATTENZIONE: nessuno shortName noto per la precipitazione tra {shortnames}. "
+              f"Serie lasciata vuota, segnalarlo per correggere lo script.", file=sys.stderr)
+        precip_values = []
+    local.unlink(missing_ok=True)
 
-    df = extract_series(tmp_grib, args.lat, args.lon)
+    # Temperatura: Kelvin -> Celsius se necessario
+    temp_c = [round(v - 273.15, 1) if v > 100 else round(v, 1) for v in series["temperatura"]]
+
+    # Vento: modulo da u/v
+    vento = [round((u ** 2 + v ** 2) ** 0.5, 1) for u, v in zip(series["vento_u"], series["vento_v"])]
+
+    umidita = [round(v, 0) for v in series["umidita"]]
 
     payload = {
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "place": args.place_name,
-        "reftime": used_reftime,
-        "run": used_run,
-        "labels": [t.strftime("%d/%m %H:%M") for t in df["datetime"]],
-        "temperatura": df.get("temperatura", pd.Series(dtype=float)).round(1).tolist(),
-        "precipitazione": df.get("precipitazione", pd.Series(dtype=float)).round(2).tolist(),
-        "vento": df.get("vento", pd.Series(dtype=float)).round(1).tolist(),
-        "umidita": df.get("umidita", pd.Series(dtype=float)).round(0).tolist(),
+        "run": run,
+        "labels": [t.strftime("%d/%m %H:%M") for t in master_times],
+        "temperatura": temp_c,
+        "vento": vento,
+        "umidita": umidita,
+        "precipitazione": [round(v, 2) for v in precip_values] if precip_values else [],
     }
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"Scritto {out_path}", file=sys.stderr)
-
-    tmp_grib.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
