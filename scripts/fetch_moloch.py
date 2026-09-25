@@ -24,8 +24,8 @@ import eccodes as ec
 
 BASE = "https://meteohub.agenziaitaliameteo.it/nwp/MOLOCH_AIM"
 
-DEFAULT_LAT = 37.5079
-DEFAULT_LON = 15.0830
+DEFAULT_LAT = 37.52234606847668
+DEFAULT_LON = 15.083971023628143
 PLACE_NAME = "Catania"
 
 # variabile amichevole -> nome cartella su /nwp/MOLOCH_AIM/{run}/
