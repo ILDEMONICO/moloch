@@ -11,6 +11,7 @@ LAT, LON = 37.521499, 15.084048
 RADIUS_KM = 10          # intorno usato per la "probabilità" di pioggia
 RAIN_MM_H = 0.2         # soglia pioggia oraria
 LATEST = "latest.json"
+HIST_DIR = "storico"
 TZNAME = "Europe/Rome"
 TZ = ZoneInfo(TZNAME)
 HEADERS = {"User-Agent": "moloch-personal-forecast (tua@email)"}
@@ -35,8 +36,13 @@ UNITS = {"temperature_2m": "°C", "relative_humidity_2m": "%", "precipitation_pr
 
 
 def hist_name(run):
-    """2026102800 -> '2026-10-28 00-00 moloch.json'"""
-    return f"{run[:4]}-{run[4:6]}-{run[6:8]} {run[8:10]}-00 moloch.json"
+    """2026102800 -> 'storico/2026-10-28 00-00 moloch.json'"""
+    return os.path.join(HIST_DIR, f"{run[:4]}-{run[4:6]}-{run[6:8]} {run[8:10]}-00 moloch.json")
+
+
+def run_iso(run):
+    """2026102800 -> '2026-10-28T00:00:00Z'"""
+    return datetime.strptime(run, "%Y%m%d%H").strftime("%Y-%m-%dT%H:%M:00Z")
 
 
 def links(url):
@@ -187,6 +193,7 @@ def publish_latest(path):
 
 
 def save(meta, rows):
+    os.makedirs(HIST_DIR, exist_ok=True)
     path = hist_name(meta["run"])
     now = datetime.now(timezone.utc)
     hourly = []
@@ -197,6 +204,7 @@ def save(meta, rows):
         hourly.append(r)
     doc = {
         "schema_version": 1, "source": "meteohub.agenziaitaliameteo.it", "model": "MOLOCH_AIM",
+        "model_run": run_iso(meta["run"]),
         "fetched_at_utc": now.strftime("%Y-%m-%dT%H:%M:00Z"),
         "fetched_at_local": now.astimezone(TZ).strftime("%Y-%m-%dT%H:%M:00%z"),
         "timezone": TZNAME,
