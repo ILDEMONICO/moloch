@@ -1,0 +1,1 @@
+    - cron: "7 * * * *"   # ogni ora al minuto 7
