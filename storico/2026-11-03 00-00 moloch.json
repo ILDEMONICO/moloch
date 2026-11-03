@@ -1,10 +1,10 @@
 {
- "schema_version": 1,
+ "schema_version": 2,
  "source": "meteohub.agenziaitaliameteo.it",
  "model": "MOLOCH_AIM",
  "model_run": "2026-11-03T00:00:00Z",
- "fetched_at_utc": "2026-11-03T12:15:00Z",
- "fetched_at_local": "2026-11-03T13:15:00+0100",
+ "fetched_at_utc": "2026-11-03T14:11:00Z",
+ "fetched_at_local": "2026-11-03T15:11:00+0100",
  "timezone": "Europe/Rome",
  "location": {
   "latitude": 37.521499,
@@ -60,14 +60,25 @@
   },
   "radius_km": 10,
   "rain_threshold_mm_h": 0.2,
-  "pop_method": "% celle entro radius_km con pioggia >= soglia"
+  "pop_method": "% celle entro radius_km con pioggia >= soglia",
+  "rain_method": "hourly_accum",
+  "time_semantics": {
+   "temperature_2m": "instant",
+   "relative_humidity_2m": "instant",
+   "cloud_cover": "instant",
+   "wind_speed_10m": "instant",
+   "wind_direction_10m": "instant",
+   "wind_gusts_10m": "instant",
+   "rain": "interval_end",
+   "precipitation_probability": "interval_end"
+  }
  },
  "hourly": [
   {
    "time_utc": "2026-11-03T00:00Z",
    "time_local": "2026-11-03T01:00",
    "temperature_2m": 10.3,
-   "relative_humidity_2m": 108,
+   "relative_humidity_2m": 100,
    "precipitation_probability": 0,
    "rain": 0.0,
    "cloud_cover": 9,
@@ -367,7 +378,7 @@
    "time_utc": "2026-11-04T01:00Z",
    "time_local": "2026-11-04T02:00",
    "temperature_2m": 10.5,
-   "relative_humidity_2m": 102,
+   "relative_humidity_2m": 100,
    "precipitation_probability": 0,
    "rain": 0.0,
    "cloud_cover": 22,
@@ -391,7 +402,7 @@
    "time_utc": "2026-11-04T03:00Z",
    "time_local": "2026-11-04T04:00",
    "temperature_2m": 10.5,
-   "relative_humidity_2m": 101,
+   "relative_humidity_2m": 100,
    "precipitation_probability": 0,
    "rain": 0.0,
    "cloud_cover": 40,
