@@ -6,6 +6,7 @@ import numpy as np
 import requests
 import eccodes as ec
 
+RAIN_MODE = "interval"      # MOLOCH
 ROOT = "https://meteohub.agenziaitaliameteo.it/nwp/MOLOCH_AIM/"
 LAT, LON = 37.521499, 15.084048
 RADIUS_KM = 10          # intorno usato per la "probabilità" di pioggia
@@ -275,12 +276,17 @@ def main():
             tp = series[0]
             row(tp[0][0])["rain"] = 0.0
             row(tp[0][0])["precipitation_probability"] = 0
-            for (t0, a, na), (t1, b, nb) in zip(tp, tp[1:]):
-                dt = (t1 - t0).total_seconds() / 3600
-                r = row(t1)
-                r["rain"] = round(max(b - a, 0), 2)           # mm nell'intervallo (orario)
-                diff = (nb - na) / dt
-                r["precipitation_probability"] = round(float((diff >= RAIN_MM_H).mean()) * 100)
+            if RAIN_MODE == "interval":
+                for t, v, nv in tp[1:]:
+                    r = row(t)
+                    r["rain"] = round(max(v, 0), 2)
+                    r["precipitation_probability"] = round(float((nv >= RAIN_MM_H).mean()) * 100)
+            else:
+                for (t0, a, na), (t1, b, nb) in zip(tp, tp[1:]):
+                    dt = (t1 - t0).total_seconds() / 3600
+                    r = row(t1)
+                    r["rain"] = round(max(b - a, 0), 2)
+                    r["precipitation_probability"] = round(float(((nb - na) / dt >= RAIN_MM_H).mean()) * 100)
 
         meta["done"].append(job)
         save(meta, rows)
