@@ -6,7 +6,7 @@ import numpy as np
 import requests
 import eccodes as ec
 
-RAIN_MODE = "interval"      # MOLOCH
+SCHEMA = 2              # 2 = tp gia' oraria (fix pioggia) + time_semantics
 ROOT = "https://meteohub.agenziaitaliameteo.it/nwp/MOLOCH_AIM/"
 LAT, LON = 37.521499, 15.084048
 RADIUS_KM = 10          # intorno usato per la "probabilità" di pioggia
@@ -24,7 +24,7 @@ JOBS = {
     "wind":  [("10u", (0, 2, 2)), ("10v", (0, 2, 3))],
     "gust":  [("gust", (0, 2, 22))],
     "cloud": [("clct", (0, 6, 1))],
-    "rain":  [("unknown", (0, 1, 8))],   # unknown = tp cumulata
+    "rain":  [("unknown", (0, 1, 8))],   # unknown = tp, gia' oraria (mm nell'ora che termina a t)
 }
 FOLDERS = [f for j in JOBS.values() for f, _ in j]
 TP = (0, 1, 8)
@@ -34,6 +34,19 @@ FIELDS = ["temperature_2m", "relative_humidity_2m", "precipitation_probability",
 UNITS = {"temperature_2m": "°C", "relative_humidity_2m": "%", "precipitation_probability": "%",
          "rain": "mm", "cloud_cover": "%", "wind_speed_10m": "km/h",
          "wind_direction_10m": "deg", "wind_gusts_10m": "km/h"}
+
+# convenzione oraria di ogni campo: instant = valore all'istante t,
+# interval_end = valore dell'intervallo che termina a t
+TIME_SEMANTICS = {
+    "temperature_2m": "instant",
+    "relative_humidity_2m": "instant",
+    "cloud_cover": "instant",
+    "wind_speed_10m": "instant",
+    "wind_direction_10m": "instant",
+    "wind_gusts_10m": "instant",
+    "rain": "interval_end",
+    "precipitation_probability": "interval_end",
+}
 
 
 def hist_name(run):
@@ -175,12 +188,13 @@ def iso(t):
 
 
 def load(run):
-    """Carica il file storico del run se esiste, altrimenti riparte da zero."""
+    """Carica il file storico del run se esiste ed e' dello schema attuale,
+    altrimenti riparte da zero (i file vecchi vengono rifatti)."""
     path = hist_name(run)
     if os.path.exists(path):
         try:
             doc = json.load(open(path, encoding="utf-8"))
-            if doc["source_meta"]["run"] == run:
+            if doc["source_meta"]["run"] == run and doc.get("schema_version") == SCHEMA:
                 return doc["source_meta"], {r["time_utc"]: r for r in doc["hourly"]}
         except Exception:
             pass
@@ -204,7 +218,7 @@ def save(meta, rows):
         r.update({f: rows[k].get(f) for f in FIELDS})
         hourly.append(r)
     doc = {
-        "schema_version": 1, "source": "meteohub.agenziaitaliameteo.it", "model": "MOLOCH_AIM",
+        "schema_version": SCHEMA, "source": "meteohub.agenziaitaliameteo.it", "model": "MOLOCH_AIM",
         "model_run": run_iso(meta["run"]),
         "fetched_at_utc": now.strftime("%Y-%m-%dT%H:%M:00Z"),
         "fetched_at_local": now.astimezone(TZ).strftime("%Y-%m-%dT%H:%M:00%z"),
@@ -212,7 +226,9 @@ def save(meta, rows):
         "location": {"latitude": LAT, "longitude": LON},
         "units": UNITS,
         "source_meta": dict(meta, radius_km=RADIUS_KM, rain_threshold_mm_h=RAIN_MM_H,
-                            pop_method="% celle entro radius_km con pioggia >= soglia"),
+                            pop_method="% celle entro radius_km con pioggia >= soglia",
+                            rain_method="hourly_accum",
+                            time_semantics=TIME_SEMANTICS),
         "hourly": hourly,
     }
     tmp = path + ".tmp"
@@ -256,7 +272,7 @@ def main():
                 row(t)["temperature_2m"] = round(v - 273.15, 1)
         elif job == "rh":
             for t, v, _ in series[0]:
-                row(t)["relative_humidity_2m"] = round(v)
+                row(t)["relative_humidity_2m"] = round(min(max(v, 0), 100))
         elif job == "cloud":
             for t, v, _ in series[0]:
                 row(t)["cloud_cover"] = round(v)
@@ -274,19 +290,14 @@ def main():
                 r["wind_direction_10m"] = round((180 + math.degrees(math.atan2(u, v))) % 360)
         elif job == "rain":
             tp = series[0]
+            # ora 0 del run: nessun intervallo precedente
             row(tp[0][0])["rain"] = 0.0
             row(tp[0][0])["precipitation_probability"] = 0
-            if RAIN_MODE == "interval":
-                for t, v, nv in tp[1:]:
-                    r = row(t)
-                    r["rain"] = round(max(v, 0), 2)
-                    r["precipitation_probability"] = round(float((nv >= RAIN_MM_H).mean()) * 100)
-            else:
-                for (t0, a, na), (t1, b, nb) in zip(tp, tp[1:]):
-                    dt = (t1 - t0).total_seconds() / 3600
-                    r = row(t1)
-                    r["rain"] = round(max(b - a, 0), 2)
-                    r["precipitation_probability"] = round(float(((nb - na) / dt >= RAIN_MM_H).mean()) * 100)
+            # tp e' gia' la pioggia oraria: va usata direttamente, senza differenze
+            for t, v, nv in tp[1:]:
+                r = row(t)
+                r["rain"] = round(max(v, 0), 2)
+                r["precipitation_probability"] = round(float((nv >= RAIN_MM_H).mean()) * 100)
 
         meta["done"].append(job)
         save(meta, rows)
